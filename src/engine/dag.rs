@@ -243,18 +243,15 @@ impl Dag {
     }
 
     /// This function is used for the execution of a single dag.
-    pub fn start(&mut self) -> Result<(), DagError> {
+    pub async fn start(&mut self) -> Result<(), DagError> {
         // If the current continuable state is false, the task will start failing.
-        if self.can_continue.load(Ordering::Acquire) {
-            self.init().map_or_else(Err, |_| {
-                tokio::runtime::Runtime::new()
-                    .unwrap()
-                    .block_on(async { self.run().await })
-            })
-        } else {
+        if !self.can_continue.load(Ordering::Acquire) {
             // TODO: Change this error
-            Err(DagError::EmptyJob)
+            return Err(DagError::EmptyJob);
         }
+
+        self.init()?;
+        self.run().await
     }
 
     /// Execute tasks sequentially according to the execution sequence given by
