@@ -138,46 +138,6 @@ impl Graph {
             None => 0,
         }
     }
-
-    /// Get all the successors of a node (direct or indirect).
-    /// This function will return a vector of indices of successors (including itself).
-    pub(crate) fn get_node_successors(&self, id: &usize) -> Vec<usize> {
-        match self.nodes.get_by_left(id) {
-            Some(index) => {
-                // initialize a vector to store successors with max possible size
-                let mut successors = Vec::with_capacity(self.adj[*index].len());
-
-                // create a visited array to avoid visiting a node more than once
-                let mut visited = vec![false; self.size];
-
-                // do BFS traversal starting from current node
-
-                // mark the current node as visited and enqueue it
-                visited[*index] = true;
-                successors.push(*index);
-
-                // the index of the queue
-                let mut i_queue = 0;
-
-                // while the queue is not empty
-                while i_queue < successors.len() {
-                    let v = successors[i_queue];
-
-                    for &index in self.adj[v].iter() {
-                        // if not visited, mark it as visited and collect it
-                        if !visited[index] {
-                            visited[index] = true;
-                            successors.push(index);
-                        }
-                    }
-                    i_queue += 1;
-                }
-                successors
-            }
-            // If node not found, return empty vector
-            None => Vec::new(),
-        }
-    }
 }
 
 impl Default for Graph {

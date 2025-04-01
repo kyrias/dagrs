@@ -65,10 +65,6 @@ pub struct Dag {
     /// when all tasks in the dag are executed, the flag will also be set to false, indicating that
     /// the task cannot be run repeatedly.
     can_continue: Arc<AtomicBool>,
-    /// A flag that indicates whether the task should continue to execute as much as possible.
-    keep_going: bool,
-    /// When `keep_going` is true, and an error occurs during the execution of a task, this flag will be set to true.
-    keep_going_errored: Arc<AtomicBool>,
     /// The execution sequence of tasks.
     exe_sequence: Vec<usize>,
 }
@@ -84,8 +80,6 @@ impl Dag {
             env: Arc::new(EnvVar::new()),
             can_continue: Arc::new(AtomicBool::new(true)),
             exe_sequence: Vec::new(),
-            keep_going: false,
-            keep_going_errored: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -96,8 +90,6 @@ impl Dag {
         self.env = Arc::new(EnvVar::new());
         self.can_continue = Arc::new(AtomicBool::new(true));
         self.exe_sequence = Vec::new();
-        self.keep_going = false;
-        self.keep_going_errored = Arc::new(AtomicBool::new(false));
     }
 
     /// Create a dag by adding a series of tasks.
@@ -159,14 +151,6 @@ impl Dag {
         specific_actions: HashMap<String, Action>,
     ) -> Result<Dag, DagError> {
         Dag::read_tasks_from_str(content, parser, specific_actions)
-    }
-
-    /// Set the flag that indicates whether the task should continue to execute as much as possible.
-    /// This means that even if an error occurs during the execution of a task, the subsequent independent tasks
-    /// will continue to execute unless a dependency error occurs.
-    pub fn keep_going(mut self) -> Dag {
-        self.keep_going = true;
-        self
     }
 
     /// Parse the content of the configuration file into a series of tasks and generate a dag.
@@ -309,24 +293,15 @@ impl Dag {
                 }
             }
         }
-        if self.keep_going {
-            // when keep_going is true, the task will continue to execute as much as possible.
-            // So, the success is evaluated by keep_going_errored.
-            if !self.keep_going_errored.load(Ordering::Relaxed) {
-                Ok(())
-            } else {
-                Err(DagError::EmptyJob)
-            }
+
+        if self
+            .can_continue
+            .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            Ok(())
         } else {
-            if self
-                .can_continue
-                .compare_exchange(true, false, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                Ok(())
-            } else {
-                Err(DagError::EmptyJob)
-            }
+            Err(DagError::EmptyJob)
         }
     }
 
@@ -390,25 +365,10 @@ impl Dag {
         })
     }
 
-    /// error handling.
-    /// When a task execution error occurs, the error handling logic is:
-    /// First, set the continuation status to false, and then release the semaphore of the
-    /// error task and the tasks after the error task, so that subsequent tasks can quickly
-    /// know that some tasks have errors and cannot continue to execute.
-    /// After that, the follow-up task finds that the flag that can continue to execute is set
-    /// to false, and the specific behavior of executing the task will be cancelled.
-    fn handle_error(&self, error_task_id: usize) {
-        if self.keep_going {
-            self.handle_errored_keep_going(error_task_id);
-        } else {
-            self.handle_errored_stopping(error_task_id);
-        }
-    }
-
     /// When the keep_going flag is set to false, the error handling logic is:
     /// - Set the continuation status to false
     /// - Adding permits for all the subsequent tasks
-    fn handle_errored_stopping(&self, error_task_id: usize) {
+    fn handle_error(&self, error_task_id: usize) {
         if self
             .can_continue
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::Relaxed)
@@ -427,24 +387,6 @@ impl Dag {
         // Add permits for all the subsequent tasks
         for tid in self.exe_sequence.iter().skip(index) {
             self.handle_errored_successor(tid, false);
-        }
-    }
-
-    /// When the keep_going flag is set to true, the error handling logic is:
-    /// - Set the keep_going_errored flag to true
-    /// - Adding permits for all tasks that rely on the error task
-    /// - Setting them as failed
-    fn handle_errored_keep_going(&self, error_task_id: usize) {
-        self.keep_going_errored.store(true, Ordering::SeqCst);
-
-        // Add permits for the tasks that rely on the error task
-        for successor in self
-            .rely_graph
-            .get_node_successors(&error_task_id)
-            .into_iter()
-        {
-            let tid = self.rely_graph.find_id_by_index(successor).unwrap();
-            self.handle_errored_successor(&tid, true);
         }
     }
 
