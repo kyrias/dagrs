@@ -4,16 +4,17 @@ use crate::{
     utils::EnvVar,
     Action, Parser,
 };
+use futures_concurrency::future::TryJoin;
 use log::{debug, error};
 use std::{
     collections::HashMap,
+    future::Future,
     panic::{self, AssertUnwindSafe},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
-use tokio::task::JoinHandle;
 
 /// [`Dag`] is dagrs's main body.
 ///
@@ -269,25 +270,15 @@ impl Dag {
         let handles = self
             .exe_sequence
             .iter()
-            .map(|id| (*id, self.execute_task(self.tasks[id].as_ref())))
-            .collect::<Vec<_>>();
+            .map(|id| self.execute_task(self.tasks[id].as_ref()))
+            .collect::<Vec<_>>()
+            .try_join()
+            .await;
 
-        // Wait for the status of each task to execute. If there is an error in the execution of a task,
-        // the engine will fail to execute and give up executing tasks that have not yet been executed.
-        for (tid, handle) in handles {
-            match handle.await {
-                Ok(succeed) => {
-                    if succeed.is_err() {
-                        self.handle_error(tid);
-                        if let Err(DagError::TaskError(_, _)) = succeed {
-                            return succeed;
-                        }
-                    }
-                }
-                Err(err) => {
-                    error!("Task execution encountered an unexpected error! {}", err);
-                    self.handle_error(tid);
-                }
+        if let Err((task_id, err)) = handles {
+            self.handle_error(task_id);
+            if let DagError::TaskError(_, _) = err {
+                return Err(err);
             }
         }
 
@@ -303,7 +294,7 @@ impl Dag {
     }
 
     /// Execute a given task asynchronously.
-    fn execute_task(&self, task: &dyn Task) -> JoinHandle<Result<(), DagError>> {
+    fn execute_task(&self, task: &dyn Task) -> impl Future<Output = Result<(), (usize, DagError)>> {
         let env = self.env.clone();
         let task_id = task.id();
         let task_name = task.name().to_string();
@@ -317,11 +308,11 @@ impl Dag {
         let action = task.action();
         let can_continue = self.can_continue.clone();
 
-        tokio::spawn(async move {
+        async move {
             // Wait for the execution result of the predecessor task
             let mut inputs = Vec::with_capacity(wait_for_input.len());
             for wait_for in wait_for_input {
-                wait_for.semaphore().acquire().await.unwrap().forget();
+                wait_for.semaphore().acquire().await.forget();
                 // When the task execution result of the predecessor can be obtained, judge whether
                 // the continuation flag is set to false, if it is set to false, cancel the specific
                 // execution logic of the task and return immediately.
@@ -339,7 +330,7 @@ impl Dag {
                     |_| {
                         error!("Execution failed [name: {}, id: {}]", task_name, task_id);
                         // TODO: Change this error
-                        Err(DagError::EmptyJob)
+                        Err((task_id, DagError::EmptyJob))
                     },
                     |out| {
                         // Store execution results
@@ -349,7 +340,7 @@ impl Dag {
                                 "Execution failed [name: {}, id: {}]\nerr: {}",
                                 task_name, task_id, error
                             );
-                            Err(DagError::TaskError(task_id, error))
+                            Err((task_id, DagError::TaskError(task_id, error)))
                         } else {
                             execute_state.set_output(out);
                             execute_state.exe_success();
@@ -359,7 +350,7 @@ impl Dag {
                         }
                     },
                 )
-        })
+        }
     }
 
     /// When the keep_going flag is set to false, the error handling logic is:

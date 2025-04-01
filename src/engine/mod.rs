@@ -16,20 +16,6 @@ use thiserror::Error;
 mod dag;
 mod graph;
 
-use std::{collections::HashMap, sync::Arc};
-use tokio::runtime::Runtime;
-
-/// The Engine. Manage multiple Dags.
-pub struct Engine {
-    dags: HashMap<String, Dag>,
-    /// According to the order in which Dags are added to the Engine, assign a sequence number to each Dag.
-    /// Sequence numbers can be used to execute Dags sequentially.
-    sequence: HashMap<usize, String>,
-    /// A tokio runtime.
-    /// In order to save computer resources, multiple Dags share one runtime.
-    runtime: Runtime,
-}
-
 /// Errors that may be raised by building and running dag jobs.
 #[derive(Debug, Error)]
 /// A synthesis of all possible errors.
@@ -49,58 +35,4 @@ pub enum DagError {
     /// Task error
     #[error("Task with ID {0} errored: {1}")]
     TaskError(usize, String),
-}
-
-impl Engine {
-    /// Add a Dag to the Engine and assign a sequence number to the Dag.
-    /// It should be noted that different Dags should specify different names.
-    pub fn append_dag(&mut self, name: &str, mut dag: Dag) {
-        if !self.dags.contains_key(name) {
-            match dag.init() {
-                Ok(()) => {
-                    self.dags.insert(name.to_string(), dag);
-                    let len = self.sequence.len();
-                    self.sequence.insert(len + 1, name.to_string());
-                }
-                Err(err) => {
-                    error!("Some error occur: {}", err);
-                }
-            }
-        }
-    }
-
-    /// Given a Dag name, execute this Dag.
-    /// Returns true if the given Dag executes successfully, otherwise false.
-    pub fn run_dag(&mut self, name: &str) -> Result<(), DagError> {
-        if let Some(dag) = self.dags.get(name) {
-            self.runtime.block_on(dag.run())
-        } else {
-            error!("No job named '{}'", name);
-            Err(DagError::EmptyJob)
-        }
-    }
-
-    /// Execute all the Dags in the Engine in sequence according to the order numbers of the Dags in
-    pub fn run_sequential(&mut self) -> Result<(), DagError> {
-        for seq in 1..self.sequence.len() + 1 {
-            let name = self.sequence.get(&seq).unwrap().clone();
-            self.run_dag(name.as_str())?;
-        }
-        Ok(())
-    }
-
-    /// Given the name of the Dag, get the execution result of the specified Dag.
-    pub fn get_dag_result<T: Send + Sync + Clone + 'static>(&self, name: &str) -> Option<Arc<T>> {
-        self.dags.get(name).and_then(|dag| dag.get_result())
-    }
-}
-
-impl Default for Engine {
-    fn default() -> Self {
-        Self {
-            dags: HashMap::new(),
-            runtime: Runtime::new().unwrap(),
-            sequence: HashMap::new(),
-        }
-    }
 }

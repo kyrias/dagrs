@@ -44,7 +44,7 @@ use std::{
     },
 };
 
-use tokio::sync::Semaphore;
+use async_lock::Semaphore;
 
 /// Container type to store task output.
 #[derive(Debug, Clone)]
